@@ -1,5 +1,11 @@
 """Демо-сценарий: регистрация, пополнение, запрос к ML-сервису, история."""
 
+import sys
+
+# Корректный вывод кириллицы в любых терминалах (Windows cmd, Git Bash и т.д.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from domain import (
     Admin, InsufficientBalanceError, LinearRegressionModel, MLService,
     TaskHistory, ThresholdScoringModel, TransactionLedger, User,
