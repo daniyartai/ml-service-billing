@@ -54,17 +54,63 @@ class ValidationResult:
 
 
 # ---------------------------------------------------------------------------
+# Баланс — отдельная сущность (SRP: пользователь не управляет балансом сам)
+# ---------------------------------------------------------------------------
+
+class InsufficientBalanceError(Exception):
+    """Списание при недостаточном балансе запрещено."""
+
+
+class Balance:
+    """Счёт пользователя в условных кредитах.
+
+    Инкапсулирует сумму и инварианты: сумма не может стать отрицательной,
+    изменения возможны только через deposit()/withdraw().
+    """
+
+    def __init__(self, initial: float = 0.0) -> None:
+        if initial < 0:
+            raise ValueError("Начальный баланс не может быть отрицательным")
+        self.__amount: float = initial                       # private
+
+    @property
+    def amount(self) -> float:
+        return self.__amount
+
+    def can_afford(self, amount: float) -> bool:
+        return self.__amount >= amount > 0 or amount == 0
+
+    def deposit(self, amount: float) -> None:
+        if amount <= 0:
+            raise ValueError("Сумма пополнения должна быть положительной")
+        self.__amount += amount
+
+    def withdraw(self, amount: float) -> None:
+        if amount <= 0:
+            raise ValueError("Сумма списания должна быть положительной")
+        if self.__amount < amount:
+            raise InsufficientBalanceError(
+                f"Недостаточно кредитов: баланс {self.__amount}, требуется {amount}"
+            )
+        self.__amount -= amount
+
+    def __repr__(self) -> str:
+        return f"<Balance {self.__amount}>"
+
+
+# ---------------------------------------------------------------------------
 # Пользователи (наследование: User -> Admin)
 # ---------------------------------------------------------------------------
 
 class User:
-    """Пользователь сервиса. Баланс и хэш пароля инкапсулированы."""
+    """Пользователь сервиса. Владеет счётом (Balance), но не управляет им:
+    операции с балансом выполняют транзакции через методы Balance."""
 
     def __init__(self, email: str, password: str, user_id: str | None = None) -> None:
         self._id: str = user_id or str(uuid.uuid4())
         self._email: str = email
         self.__password_hash: str = self.__hash(password)   # private
-        self.__balance: float = 0.0                          # private
+        self._balance: Balance = Balance()                   # композиция
         self._created_at: datetime = datetime.now(timezone.utc)
 
     # --- инкапсуляция: только чтение ---
@@ -77,8 +123,9 @@ class User:
         return self._email
 
     @property
-    def balance(self) -> float:
-        return self.__balance
+    def balance(self) -> Balance:
+        """Счёт пользователя (сумма — balance.amount)."""
+        return self._balance
 
     @property
     def is_admin(self) -> bool:
@@ -92,20 +139,8 @@ class User:
     def verify_password(self, password: str) -> bool:
         return self.__hash(password) == self.__password_hash
 
-    # --- работа с балансом: единственная точка изменения __balance ---
-    def _apply_delta(self, delta: float) -> None:
-        """Protected: вызывается только транзакциями (Transaction.apply)."""
-        if self.__balance + delta < 0:
-            raise InsufficientBalanceError(
-                f"Недостаточно кредитов: баланс {self.__balance}, требуется {-delta}"
-            )
-        self.__balance += delta
-
-    def can_afford(self, amount: float) -> bool:
-        return self.__balance >= amount > 0 or amount == 0
-
     def __repr__(self) -> str:
-        return f"<User {self._email} balance={self.__balance}>"
+        return f"<User {self._email} balance={self._balance.amount}>"
 
 
 class Admin(User):
@@ -127,10 +162,6 @@ class Admin(User):
 
     def view_all_transactions(self, ledger: "TransactionLedger") -> list["Transaction"]:
         return ledger.all()
-
-
-class InsufficientBalanceError(Exception):
-    """Списание при недостаточном балансе запрещено."""
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +219,7 @@ class DepositTransaction(Transaction):
         return TransactionType.DEPOSIT
 
     def apply(self) -> None:
-        self._user._apply_delta(+self._amount)
+        self._user.balance.deposit(self._amount)
 
 
 class WithdrawalTransaction(Transaction):
@@ -207,7 +238,7 @@ class WithdrawalTransaction(Transaction):
         return self._task
 
     def apply(self) -> None:
-        self._user._apply_delta(-self._amount)
+        self._user.balance.withdraw(self._amount)
 
 
 class TransactionLedger:
@@ -384,10 +415,10 @@ class MLService:
         self.__history.add(task)
 
         # 1. Проверка положительного баланса ДО выполнения
-        if not user.can_afford(model.cost_per_request):
+        if not user.balance.can_afford(model.cost_per_request):
             task._fail()
             raise InsufficientBalanceError(
-                f"Баланс {user.balance} < стоимости запроса {model.cost_per_request}"
+                f"Баланс {user.balance.amount} < стоимости запроса {model.cost_per_request}"
             )
 
         # 2. Валидация: ошибочные строки возвращаются пользователю

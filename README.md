@@ -20,7 +20,8 @@ python demo.py
 
 | Класс | Назначение |
 |---|---|
-| `User` / `Admin` | Пользователь и администратор (наследование). Баланс и хэш пароля — приватные поля |
+| `Balance` | Счёт в условных кредитах: инкапсулирует сумму и инварианты (не может уйти в минус), изменения только через `deposit()`/`withdraw()` |
+| `User` / `Admin` | Пользователь и администратор (наследование). Владеет счётом `Balance` (композиция), но не управляет им; хэш пароля — приватное поле |
 | `Transaction` (ABC) → `DepositTransaction`, `WithdrawalTransaction` | Пополнение и списание; полиморфный `apply()` |
 | `TransactionLedger` | История транзакций, выборка по пользователю |
 | `MLModel` (ABC) → `ThresholdScoringModel`, `LinearRegressionModel` | Модели с единым интерфейсом `validate()` / `predict()` и стоимостью запроса |
@@ -31,16 +32,20 @@ python demo.py
 
 ```mermaid
 classDiagram
+    class Balance {
+        -__amount: float
+        +amount: float
+        +can_afford(amount: float) bool
+        +deposit(amount: float)
+        +withdraw(amount: float)
+    }
     class User {
         -id: str
         -email: str
         -__password_hash: str
-        -__balance: float
-        +balance: float
+        -balance: Balance
         +is_admin: bool
         +verify_password(password: str) bool
-        +can_afford(amount: float) bool
-        #_apply_delta(delta: float)
     }
     class Admin {
         +is_admin: bool
@@ -107,6 +112,7 @@ classDiagram
         +for_user(user) list~MLTask~
     }
 
+    User *-- Balance
     User <|-- Admin
     Transaction <|-- DepositTransaction
     Transaction <|-- WithdrawalTransaction
@@ -122,11 +128,16 @@ classDiagram
 
 ## Принципы ООП
 
-**Инкапсуляция.** Баланс (`User.__balance`) и хэш пароля — приватные; изменение
-баланса возможно только через транзакции (`Transaction.apply()` →
-`User._apply_delta()`), напрямую выставить баланс нельзя. Внутренние списки
-историй закрыты, наружу отдаются копии. Состояние `MLTask` меняется только
-методами оркестратора.
+**Инкапсуляция.** Сумма счёта (`Balance.__amount`) и хэш пароля — приватные;
+изменение баланса возможно только через `Balance.deposit()`/`Balance.withdraw()`,
+которые вызываются транзакциями (`Transaction.apply()`) и защищают инвариант
+неотрицательности. Внутренние списки историй закрыты, наружу отдаются копии.
+Состояние `MLTask` меняется только методами оркестратора.
+
+**Разделение ответственности (SRP).** Управление балансом — не зона
+ответственности пользователя: `User` лишь владеет счётом (композиция
+`User *-- Balance`), а правила операций инкапсулированы в самой сущности
+`Balance`.
 
 **Наследование.** `Admin` расширяет `User` (пополнение баланса другим
 пользователям, просмотр всех транзакций); конкретные транзакции и модели

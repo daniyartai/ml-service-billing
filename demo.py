@@ -36,7 +36,7 @@ def main() -> None:
 
     # Админ пополняет баланс пользователю
     admin.top_up_user(user, 50.0, ledger)
-    print("Баланс после пополнения:", user.balance)
+    print("Баланс после пополнения:", user.balance.amount)
 
     # Запрос со смешанными данными: валидные + ошибочные
     rows = [
@@ -51,7 +51,7 @@ def main() -> None:
     print("Ошибочные строки, возвращённые пользователю:")
     for row, reason in task.invalid_rows:
         print("  ", row, "->", reason)
-    print("Списано кредитов:", task.charged, "| Баланс:", user.balance)
+    print("Списано кредитов:", task.charged, "| Баланс:", user.balance.amount)
 
     # Истории
     print("\nИстория транзакций пользователя:")
