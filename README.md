@@ -1,22 +1,60 @@
-# ML-сервис с биллингом — Этап 1: объектная модель
+# ML-сервис с биллингом
 
-Объектная модель личного кабинета ML-сервиса: пользователи, баланс в условных
-кредитах, транзакции, ML-модели, задачи предсказания и их история.
+Личный кабинет ML-сервиса: пользователи, баланс в условных кредитах,
+транзакции, ML-модели, задачи предсказания и их история.
 
-## Структура
+## Структура проекта
 
-- `domain.py` — объектная модель сервиса
-- `demo.py` — демо-сценарий: регистрация, пополнение, запрос с валидацией, списание, история
+```
+project-root/
+├── app/                      # backend-приложение
+│   ├── src/
+│   │   ├── main.py           # FastAPI: /, /health, /models
+│   │   ├── domain.py         # объектная модель сервиса (этап 1)
+│   │   └── demo.py           # демо-сценарий работы модели
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── .env                  # конфигурация приложения
+├── web-proxy/                # reverse proxy
+│   ├── nginx.conf
+│   └── Dockerfile
+├── docker-compose.yml        # 4 сервиса: app, web-proxy, rabbitmq, database
+└── README.md
+```
 
 ## Запуск
 
 ```bash
-python demo.py
+docker compose up --build
 ```
 
-Зависимостей нет, требуется Python 3.10+.
+После запуска:
 
-## Сущности
+- http://localhost — приложение через nginx (порты 80/443)
+- http://localhost:15672 — RabbitMQ management UI (guest/guest)
+- PostgreSQL — порт 5432 внутри сети `ml-service-network`
+
+Проверка без Docker:
+
+```bash
+cd app/src && python demo.py       # демо объектной модели
+```
+
+## Архитектура сервисов
+
+| Сервис | Образ | Назначение |
+|---|---|---|
+| `app` | python:3.12-slim (свой Dockerfile) | FastAPI-приложение; конфиг через `env_file`, исходники через `volumes`, портов наружу нет — доступ только через proxy |
+| `web-proxy` | nginx:latest | Reverse proxy; `depends_on: app`, наружу порты 80 и 443 |
+| `rabbitmq` | rabbitmq:3-management | Брокер сообщений; порты 5672 (AMQP) и 15672 (UI); данные в `./volumes/rabbitmq`; `restart: unless-stopped` |
+| `database` | postgres:16 | БД; конфиг через переменные окружения; данные в `./volumes/postgres`, переживают удаление контейнера |
+
+Все сервисы объединены bridge-сетью `ml-service-network` и общаются по
+именам сервисов (например, `app` подключается к базе по хосту `database`).
+
+## Объектная модель (этап 1)
+
+Модель находится в `app/src/domain.py`, демо-сценарий — `app/src/demo.py`.
 
 | Класс | Назначение |
 |---|---|

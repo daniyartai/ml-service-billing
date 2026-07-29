@@ -1,0 +1,78 @@
+version: "3.8"
+
+services:
+
+  # 1. Backend-приложение.
+  # Конфигурация — через env_file, исходники — через volumes.
+  # Порты наружу НЕ пробрасываются: доступ только через web-proxy.
+  app:
+    build: ./app/
+    image: ml-service-app:latest
+    container_name: ml-service-app
+    restart: unless-stopped
+    env_file:
+      - ./app/.env
+    volumes:
+      - ./app/src:/app
+    networks:
+      - ml-service-network
+    depends_on:
+      - database
+      - rabbitmq
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # 2. Reverse proxy на основе Nginx.
+  # Зависит от app, проксирует HTTP-запросы, наружу — порты 80 и 443.
+  web-proxy:
+    build: ./web-proxy/
+    image: ml-service-proxy:latest
+    container_name: ml-service-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - ml-service-network
+
+  # 3. Брокер сообщений RabbitMQ (образ с management UI на порту 15672).
+  # Данные очередей сохраняются на диске хоста через volume.
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: ml-service-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI
+    volumes:
+      - ./volumes/rabbitmq:/var/lib/rabbitmq
+    networks:
+      - ml-service-network
+
+  # 4. База данных PostgreSQL.
+  # Конфигурация через переменные окружения, данные сохраняются
+  # на диске хоста через volume даже при удалении контейнера.
+  database:
+    image: postgres:16
+    container_name: ml-service-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ml_user
+      POSTGRES_PASSWORD: ml_password
+      POSTGRES_DB: ml_service
+    volumes:
+      - ./volumes/postgres:/var/lib/postgresql/data
+    networks:
+      - ml-service-network
+
+networks:
+  ml-service-network:
+    name: ml-service-network
+    driver: bridge
