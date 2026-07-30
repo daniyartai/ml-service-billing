@@ -18,6 +18,7 @@ project-root/
 ├── web-proxy/                # reverse proxy
 │   ├── nginx.conf
 │   └── Dockerfile
+├── .env.example              # шаблон корневого .env (переменные для database)
 ├── docker-compose.yml        # 4 сервиса: app, web-proxy, rabbitmq, database
 └── README.md
 ```
@@ -25,8 +26,12 @@ project-root/
 ## Запуск
 
 ```bash
+cp .env.example .env       # один раз: корневой .env со значениями POSTGRES_*
 docker compose up --build
 ```
+
+Корневой `.env` не хранится в репозитории (см. `.gitignore`) — значения из
+него подставляются в сервис `database` через `${...}` в `docker-compose.yml`.
 
 После запуска:
 
@@ -46,8 +51,8 @@ cd app/src && python demo.py       # демо объектной модели
 |---|---|---|
 | `app` | python:3.12-slim (свой Dockerfile) | FastAPI-приложение; конфиг через `env_file`, исходники через `volumes`, портов наружу нет — доступ только через proxy |
 | `web-proxy` | nginx:latest | Reverse proxy; `depends_on: app`, наружу порты 80 и 443 |
-| `rabbitmq` | rabbitmq:3-management | Брокер сообщений; порты 5672 (AMQP) и 15672 (UI); данные в `./volumes/rabbitmq`; `restart: unless-stopped` |
-| `database` | postgres:16 | БД; конфиг через переменные окружения; данные в `./volumes/postgres`, переживают удаление контейнера |
+| `rabbitmq` | rabbitmq:3-management | Брокер сообщений; порты 5672 (AMQP) и 15672 (UI); данные очередей в named volume `rabbitmq_volume`; `restart: on-failure` — автоперезапуск при сбоях |
+| `database` | postgres:16 | БД; конфиг через `${POSTGRES_*}` из корневого `.env` (секретов в docker-compose.yml нет); данные в named volume `postgres_volume` — переживают удаление контейнера и директории проекта |
 
 Все сервисы объединены bridge-сетью `ml-service-network` и общаются по
 именам сервисов (например, `app` подключается к базе по хосту `database`).
