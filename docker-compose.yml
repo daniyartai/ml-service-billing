@@ -42,9 +42,13 @@ services:
   # 3. Брокер сообщений RabbitMQ (образ с management UI на порту 15672).
   # Данные очередей сохраняются в именованном volume — не теряются
   # при удалении контейнера или директории проекта.
+  # Фиксированный hostname обязателен: RabbitMQ хранит данные в
+  # mnesia/rabbit@<hostname>; без него новый контейнер получает случайное
+  # имя узла и не видит данные, записанные предыдущим контейнером.
   rabbitmq:
     image: rabbitmq:3-management
     container_name: ml-service-rabbitmq
+    hostname: rabbitmq
     restart: on-failure
     ports:
       - "5672:5672"    # AMQP
