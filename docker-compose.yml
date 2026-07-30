@@ -30,7 +30,6 @@ services:
   # Зависит от app, проксирует HTTP-запросы, наружу — порты 80 и 443.
   web-proxy:
     build: ./web-proxy/
-    image: ml-service-proxy:latest
     container_name: ml-service-proxy
     restart: unless-stopped
     ports:
@@ -43,32 +42,34 @@ services:
       - ml-service-network
 
   # 3. Брокер сообщений RabbitMQ (образ с management UI на порту 15672).
-  # Данные очередей сохраняются на диске хоста через volume.
+  # Данные очередей сохраняются в именованном volume — не теряются
+  # при удалении контейнера или директории проекта.
   rabbitmq:
     image: rabbitmq:3-management
     container_name: ml-service-rabbitmq
-    restart: unless-stopped
+    restart: on-failure
     ports:
       - "5672:5672"    # AMQP
       - "15672:15672"  # management UI
     volumes:
-      - ./volumes/rabbitmq:/var/lib/rabbitmq
+      - rabbitmq_volume:/var/lib/rabbitmq
     networks:
       - ml-service-network
 
   # 4. База данных PostgreSQL.
-  # Конфигурация через переменные окружения, данные сохраняются
-  # на диске хоста через volume даже при удалении контейнера.
+  # Конфигурация — через переменные окружения из корневого .env
+  # (в docker-compose.yml секретов нет). Данные — в именованном
+  # volume, переживают удаление контейнера или директории проекта.
   database:
     image: postgres:16
     container_name: ml-service-database
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ml_user
-      POSTGRES_PASSWORD: ml_password
-      POSTGRES_DB: ml_service
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - ./volumes/postgres:/var/lib/postgresql/data
+      - postgres_volume:/var/lib/postgresql/data
     networks:
       - ml-service-network
 
@@ -76,3 +77,7 @@ networks:
   ml-service-network:
     name: ml-service-network
     driver: bridge
+
+volumes:
+  postgres_volume:
+  rabbitmq_volume:
