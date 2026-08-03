@@ -1,18 +1,23 @@
 """Точка входа backend-приложения ML-сервиса.
 
-Минимальный FastAPI-каркас поверх объектной модели (domain.py).
+FastAPI-каркас поверх объектной модели (domain.py) и ORM-слоя (Задание №3).
 Конфигурация читается из переменных окружения (.env через docker-compose).
+При старте выполняется автоматическая идемпотентная инициализация БД.
 """
 
 import logging
 import os
-from typing import Dict
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Dict
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 
-from domain import LinearRegressionModel, ThresholdScoringModel
+from database import SessionLocal
+from db_models import MLModelORM
+from init_db import init_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,14 +25,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Автоматическая инициализация БД при старте приложения (идемпотентно)."""
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="ML Service API",
     description="Личный кабинет ML-сервиса с биллингом в условных кредитах",
-    version="0.2.0",
+    version="0.3.0",
+    lifespan=lifespan,
 )
-
-# Доступные модели (позже будут храниться в базе данных)
-MODELS = [ThresholdScoringModel(), LinearRegressionModel()]
 
 
 @app.get("/", response_model=Dict[str, str])
@@ -48,11 +59,18 @@ async def health_check() -> Dict[str, str]:
 
 @app.get("/models")
 async def list_models() -> list[dict]:
-    """Список доступных ML-моделей и стоимость запроса в кредитах."""
+    """Список доступных ML-моделей — теперь из базы данных (таблица ml_models)."""
     logger.info("Запрошен список моделей")
+    with SessionLocal() as session:
+        models = session.scalars(select(MLModelORM)).all()
     return [
-        {"name": m.name, "cost_per_request": m.cost_per_request}
-        for m in MODELS
+        {
+            "name": m.name,
+            "cost_per_request": float(m.cost_per_request),
+            "required_features": m.required_features,
+            "description": m.description,
+        }
+        for m in models
     ]
 
 

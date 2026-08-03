@@ -278,6 +278,11 @@ class MLModel(ABC):
     def cost_per_request(self) -> float:
         return self._cost
 
+    @property
+    def required_features(self) -> list[str]:
+        """Требуемые признаки (только чтение — копия внутреннего списка)."""
+        return list(self._required_features)
+
     def validate(self, rows: list[dict[str, Any]]) -> ValidationResult:
         """Базовая валидация: наличие признаков и числовой тип значений."""
         valid, invalid = [], []
