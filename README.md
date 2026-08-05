@@ -18,6 +18,8 @@ project-root/
 │   │   ├── schemas.py        # Pydantic-схемы запросов и ответов API (этап 4)
 │   │   ├── security.py       # bearer-аутентификация, зависимость get_current_user
 │   │   ├── routers/          # эндпоинты по группам: auth, users, balance, predict, history
+│   │   ├── mq.py             # публикация задач в очередь RabbitMQ (publisher, этап 5)
+│   │   ├── worker.py         # ML-воркер: consumer очереди (этап 5)
 │   │   ├── init_db.py        # идемпотентная инициализация БД и демо-данных
 │   │   └── tests/            # pytest-тесты: сценарии БД (этап 3) и REST API (этап 4)
 │   ├── Dockerfile
@@ -61,6 +63,7 @@ cd app/src && python demo.py       # демо объектной модели
 | `web-proxy` | nginx:latest | Reverse proxy; `depends_on: app`, наружу порты 80 и 443 |
 | `rabbitmq` | rabbitmq:3-management | Брокер сообщений; порты 5672 (AMQP) и 15672 (UI); данные очередей в named volume `rabbitmq_volume`; `restart: on-failure` — автоперезапуск при сбоях |
 | `database` | postgres:16 | БД; конфиг через `${POSTGRES_*}` из корневого `.env` (секретов в docker-compose.yml нет); данные в named volume `postgres_volume` — переживают удаление контейнера и директории проекта |
+| `worker` ×2 | образ app | ML-воркеры (этап 5): consumers очереди `ml_tasks`, `deploy.replicas: 2`, `restart: on-failure` |
 
 Все сервисы объединены bridge-сетью `ml-service-network` и общаются по
 именам сервисов (например, `app` подключается к базе по хосту `database`).
@@ -270,18 +273,66 @@ Bearer-токен, хранится в таблице `access_tokens` (JWT — �
 | `GET /users/me` | текущий пользователь | 401 |
 | `GET /balance` | текущий баланс | 401 |
 | `POST /balance/top-up` | пополнение, возвращает обновлённый баланс | 401, 422 сумма <= 0 |
-| `POST /predict` | предсказание: списание кредитов + запись в историю | 401, 402 нет кредитов, 400 невалидные данные, 404 нет модели |
+| `POST /predict` | поставить задачу в очередь RabbitMQ, вернуть `task_id` (status `new`) | 401, 402 нет кредитов, 404 нет модели, 503 брокер недоступен |
 | `GET /predict/{task_id}` | задача по id | 401, 404 (в т.ч. чужая задача) |
 | `GET /history/predictions` | история ML-запросов (дата, статус, кредиты) | 401 |
 | `GET /history/transactions` | история транзакций | 401 |
 
 Единый формат ошибок: `{"detail": ...}` с корректным HTTP-кодом.
-Ответ `/predict` построен вокруг задачи (`task_id`, `status`, `result`) —
-контракт готов к асинхронной обработке через RabbitMQ (этап 5): статус
-`new` при постановке и опрос результата через `GET /predict/{task_id}`.
+Ответ `/predict` построен вокруг задачи (`task_id`, `status`, `result`);
+с этапа 5 обработка асинхронная: POST возвращает статус `new`, а результат
+забирается через `GET /predict/{task_id}` после обработки воркером.
 
 ### Тесты
 
 ```bash
-docker compose exec app pytest -v   # 20 тестов: сценарии БД + REST API
+docker compose exec app pytest -v   # 21 тест: сценарии БД, REST API, формат сообщений очереди
 ```
+
+## Асинхронная обработка через RabbitMQ (этап 5)
+
+Модель publisher → broker → consumers на одной durable-очереди `ml_tasks`
+(default exchange). Полный путь задачи:
+
+1. `POST /predict` (publisher): проверка баланса, создание задачи в БД
+   (status `new`), публикация JSON-сообщения в очередь, клиенту сразу
+   возвращается `task_id`;
+2. RabbitMQ раздаёт сообщения воркерам по кругу (round-robin);
+   `prefetch_count=1` — воркер не берёт новую задачу, пока не подтвердил
+   текущую, поэтому распределение честное;
+3. воркер (`worker.py`, 2 экземпляра через `deploy.replicas`): валидация →
+   полиморфный предикт → списание кредитов, транзакция и результат в БД
+   напрямую (одним коммитом) → лог результата → `basic_ack`.
+
+Сообщение-задача и лог результата — в формате задания:
+
+```json
+{"task_id": "uuid", "features": [{"feature_1": 1.0, "feature_2": 1.0}],
+ "model": "threshold-scoring", "timestamp": "2026-08-06T12:00:00+00:00"}
+```
+```json
+{"task_id": "uuid", "prediction": [1], "worker_id": "worker-abc123", "status": "done"}
+```
+
+Надёжность: очередь durable, сообщения persistent (`delivery_mode=2`),
+подтверждение после обработки — при падении воркера задача возвращается в
+очередь и достаётся другому; повторная доставка безопасна (задача со
+статусом не-`new` не обрабатывается заново).
+
+### Как проверить
+
+```bash
+docker compose up -d --build         # поднимет и двух воркеров
+docker compose ps                    # ...-worker-1 и ...-worker-2
+docker compose logs -f worker        # видно, какой воркер взял какую задачу
+```
+
+Через Swagger (/docs): `POST /predict` несколько раз подряд → в логах
+воркеров задачи чередуются между `worker_id` (round-robin);
+`GET /predict/{task_id}` → статус меняется `new` → `done`, появляется
+результат и списание. Очередь видна в management UI:
+http://localhost:15672 → Queues → `ml_tasks`.
+
+Проверка отсутствия потерь: `docker compose stop worker` → отправить
+несколько задач (в UI очереди растёт Ready) → `docker compose start worker`
+→ задачи разобраны, ни одна не потеряна.

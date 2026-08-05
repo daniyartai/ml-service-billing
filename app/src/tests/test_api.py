@@ -20,6 +20,25 @@ def client():
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _stub_queue(monkeypatch):
+    """В тестах брокер не поднимается: публикацию в RabbitMQ заменяем
+    заглушкой, а работу воркера имитируем прямым вызовом
+    services.execute_prediction_task (см. _run_worker)."""
+    import routers.predict as predict_router
+
+    monkeypatch.setattr(predict_router.mq, "publish_task", lambda task: None)
+
+
+def _run_worker(task_id: str) -> None:
+    """Имитация воркера: выполнить задачу так же, как это делает worker.py."""
+    from database import SessionLocal
+    from services import execute_prediction_task
+
+    with SessionLocal() as session:
+        execute_prediction_task(session, task_id)
+
+
 def unique_email() -> str:
     return f"api-{uuid.uuid4().hex[:10]}@ml-service.com"
 
@@ -126,6 +145,7 @@ def test_predict_success_and_history(client):
     headers, _ = register_and_login(client)
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
+    # publisher: задача поставлена в очередь, ответ сразу — task_id и status=new
     resp = client.post(
         "/predict",
         json={
@@ -136,17 +156,24 @@ def test_predict_success_and_history(client):
     )
     assert resp.status_code == 201, resp.text
     task = resp.json()
-    assert task["status"] == "done"
-    assert task["result"] == [1]
-    assert task["charged"] == 5.0
+    assert task["status"] == "new"
+    assert task["result"] is None
+    # кредиты ещё не списаны — списание выполнит воркер
+    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
-    # кредиты списаны
-    assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
+    # consumer: имитируем воркера
+    _run_worker(task["task_id"])
 
-    # задача доступна по id
+    # опрос результата
     resp = client.get(f"/predict/{task['task_id']}", headers=headers)
     assert resp.status_code == 200
-    assert resp.json()["task_id"] == task["task_id"]
+    done = resp.json()
+    assert done["status"] == "done"
+    assert done["result"] == [1]
+    assert done["charged"] == 5.0
+
+    # кредиты списаны воркером
+    assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
 
     # история предиктов: дата, статус, списанные кредиты
     resp = client.get("/history/predictions", headers=headers)
@@ -183,7 +210,7 @@ def test_predict_insufficient_balance_402(client):
     assert len(history) == 1 and history[0]["status"] == "failed"
 
 
-def test_predict_invalid_rows_400(client):
+def test_predict_validation_failed_async(client):
     headers, _ = register_and_login(client)
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
@@ -192,9 +219,14 @@ def test_predict_invalid_rows_400(client):
         json={"model": "threshold-scoring", "rows": [{"feature_1": 1.0}]},
         headers=headers,
     )
-    assert resp.status_code == 400
-    detail = resp.json()["detail"]
-    assert detail["invalid_rows"]  # причины ошибок по строкам
+    assert resp.status_code == 201  # публикация прошла, валидация — в воркере
+    task_id = resp.json()["task_id"]
+
+    _run_worker(task_id)
+
+    task = client.get(f"/predict/{task_id}", headers=headers).json()
+    assert task["status"] == "validation_failed"
+    assert task["invalid_rows"]  # причины ошибок по строкам
 
     # кредиты не списаны
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
@@ -226,3 +258,30 @@ def test_foreign_task_hidden_404(client):
     headers_b, _ = register_and_login(client)
     resp = client.get(f"/predict/{task['task_id']}", headers=headers_b)
     assert resp.status_code == 404  # чужая задача не раскрывается
+
+
+# ---------------------------------------------------------------------------
+# Формат сообщения очереди (Задание №5)
+# ---------------------------------------------------------------------------
+
+def test_queue_message_format(client):
+    """Сообщение для RabbitMQ содержит обязательные поля задания №5."""
+    from database import SessionLocal
+    from mq import build_message
+    from services import create_prediction_task, create_user, top_up
+
+    with SessionLocal() as session:
+        user = create_user(session, unique_email(), "secret123")
+        top_up(session, user.id, 20)
+        task = create_prediction_task(
+            session,
+            user.id,
+            "threshold-scoring",
+            [{"feature_1": 1.0, "feature_2": 1.0}],
+        )
+        message = build_message(task)
+
+    assert message["task_id"] == task.id
+    assert message["model"] == "threshold-scoring"
+    assert message["features"] == [{"feature_1": 1.0, "feature_2": 1.0}]
+    assert "timestamp" in message

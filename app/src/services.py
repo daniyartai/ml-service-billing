@@ -276,6 +276,9 @@ def execute_prediction_task(session: Session, task_id: str) -> MLTaskORM:
     task = session.get(MLTaskORM, task_id)
     if task is None:
         raise ValueError(f"Задача {task_id} не найдена")
+    if task.status != TaskStatus.NEW:
+        # повторная доставка сообщения (redelivery) — задача уже обработана
+        return task
     model_row = task.model
     impl = _model_impl(model_row)
 
