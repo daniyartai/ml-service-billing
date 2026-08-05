@@ -1,20 +1,34 @@
-"""Бизнес-операции поверх ORM (Задание №3).
+"""Бизнес-операции поверх ORM (Задания №3-4).
 
 Каждая операция атомарна: изменение баланса, запись транзакции и результата
 выполняются одним session.commit() — «всё или ничего».
 Бизнес-правила переиспользуются из domain.py (enum-ы, InsufficientBalanceError,
 классы ML-моделей с полиморфным predict/validate) — смысл сущностей
-задания №1 не менялся.
+задания №1 не менялся. REST-контроллеры (routers/) логику не дублируют,
+а вызывают функции этого модуля.
+
+Предикт разделён на две фазы с прицелом на асинхронный этап №5:
+  create_prediction_task() — сторона publisher'а (создать задачу, проверить баланс);
+  execute_prediction_task() — сторона воркера (валидация, предикт, списание).
+Сейчас run_prediction() вызывает их последовательно (синхронно).
 """
 
 import hashlib
+import secrets
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db_models import BalanceORM, MLModelORM, MLTaskORM, TransactionORM, UserORM
+from db_models import (
+    AccessTokenORM,
+    BalanceORM,
+    MLModelORM,
+    MLTaskORM,
+    TransactionORM,
+    UserORM,
+)
 from domain import (
     InsufficientBalanceError,
     LinearRegressionModel,
@@ -104,6 +118,34 @@ def get_balance(session: Session, user_id: str) -> Decimal:
 
 
 # ---------------------------------------------------------------------------
+# Аутентификация (Задание №4): bearer-токены в БД
+# ---------------------------------------------------------------------------
+
+def authenticate(session: Session, email: str, password: str) -> UserORM:
+    """Проверить пару email/пароль. Неверные данные -> ValueError."""
+    user = get_user_by_email(session, email)
+    if user is None or not verify_password(user, password):
+        raise ValueError("Неверный email или пароль")
+    return user
+
+
+def create_access_token(session: Session, user_id: str) -> AccessTokenORM:
+    """Выдать пользователю новый токен доступа."""
+    user = _require_user(session, user_id)
+    token = AccessTokenORM(token=secrets.token_hex(32), user_id=user.id)
+    session.add(token)
+    session.commit()
+    session.refresh(token)
+    return token
+
+
+def get_user_by_token(session: Session, token: str) -> UserORM | None:
+    """Найти пользователя по токену (None — токен недействителен)."""
+    row = session.get(AccessTokenORM, token)
+    return row.user if row is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Баланс и транзакции
 # ---------------------------------------------------------------------------
 
@@ -176,18 +218,25 @@ def get_user_transactions(session: Session, user_id: str) -> list[TransactionORM
 # Предсказания и история запросов
 # ---------------------------------------------------------------------------
 
-def run_prediction(
+def _model_impl(model_row: MLModelORM) -> MLModel:
+    """Экземпляр реализации модели из domain.py по строке каталога БД."""
+    impl_cls = MODEL_REGISTRY.get(model_row.name)
+    if impl_cls is None:
+        raise ValueError(f"Нет реализации для модели '{model_row.name}'")
+    return impl_cls(
+        name=model_row.name, cost_per_request=float(model_row.cost_per_request)
+    )
+
+
+def create_prediction_task(
     session: Session,
     user_id: str,
     model_name: str,
     rows: list[dict[str, Any]],
 ) -> MLTaskORM:
-    """Сценарий MLService.submit из domain.py, но с сохранением в БД:
+    """Сторона publisher'а: создать задачу и проверить баланс ДО выполнения.
 
-    1. проверка баланса ДО выполнения;
-    2. валидация входных строк (ошибочные возвращаются пользователю);
-    3. полиморфный predict();
-    4. списание + результат + история — одним коммитом (атомарно).
+    На этапе №5 именно после этой функции задача уйдёт в очередь RabbitMQ.
     """
     user = _require_user(session, user_id)
     model_row = session.scalar(
@@ -195,13 +244,7 @@ def run_prediction(
     )
     if model_row is None:
         raise ValueError(f"ML-модель '{model_name}' не найдена")
-
-    impl_cls = MODEL_REGISTRY.get(model_row.name)
-    if impl_cls is None:
-        raise ValueError(f"Нет реализации для модели '{model_row.name}'")
-    impl = impl_cls(
-        name=model_row.name, cost_per_request=float(model_row.cost_per_request)
-    )
+    _model_impl(model_row)  # проверяем, что реализация существует
 
     task = MLTaskORM(
         user_id=user.id,
@@ -210,21 +253,34 @@ def run_prediction(
         status=TaskStatus.NEW,
     )
     session.add(task)
-    session.flush()  # присваивает task.id до привязки транзакции
+    session.flush()  # присваивает task.id
 
-    cost = model_row.cost_per_request
     balance = _lock_balance(session, user.id)
-
-    # 1. Проверка баланса до выполнения
-    if balance.amount < cost:
+    if balance.amount < model_row.cost_per_request:
         task.status = TaskStatus.FAILED
         session.commit()  # отказ тоже сохраняется в истории
         raise InsufficientBalanceError(
-            f"Баланс {balance.amount} < стоимости запроса {cost}"
+            f"Баланс {balance.amount} < стоимости запроса "
+            f"{model_row.cost_per_request}"
         )
+    session.commit()
+    session.refresh(task)
+    return task
 
-    # 2. Валидация: некорректные строки возвращаются пользователю
-    validation = impl.validate(rows)
+
+def execute_prediction_task(session: Session, task_id: str) -> MLTaskORM:
+    """Сторона воркера: валидация -> предикт -> списание + результат атомарно.
+
+    На этапе №5 эту функцию будет вызывать consumer, читающий очередь.
+    """
+    task = session.get(MLTaskORM, task_id)
+    if task is None:
+        raise ValueError(f"Задача {task_id} не найдена")
+    model_row = task.model
+    impl = _model_impl(model_row)
+
+    # 1. Валидация: некорректные строки возвращаются пользователю
+    validation = impl.validate(task.input_data)
     task.invalid_rows = [
         {"row": row, "reason": reason} for row, reason in validation.invalid_rows
     ]
@@ -233,7 +289,7 @@ def run_prediction(
         session.commit()
         return task
 
-    # 3. Полиморфный предикт
+    # 2. Полиморфный предикт
     task.status = TaskStatus.RUNNING
     try:
         result = impl.predict(validation.valid_rows)
@@ -242,11 +298,21 @@ def run_prediction(
         session.commit()
         raise
 
-    # 4. Списание, транзакция, результат — одним коммитом
+    # 3. Повторная проверка баланса на момент выполнения (важно для этапа №5,
+    #    где между постановкой и обработкой задачи проходит время),
+    #    затем списание, транзакция и результат — одним коммитом
+    cost = model_row.cost_per_request
+    balance = _lock_balance(session, task.user_id)
+    if balance.amount < cost:
+        task.status = TaskStatus.FAILED
+        session.commit()
+        raise InsufficientBalanceError(
+            f"Баланс {balance.amount} < стоимости запроса {cost}"
+        )
     balance.amount -= cost
     session.add(
         TransactionORM(
-            user_id=user.id,
+            user_id=task.user_id,
             type=TransactionType.WITHDRAWAL,
             amount=cost,
             task_id=task.id,
@@ -258,6 +324,25 @@ def run_prediction(
     session.commit()
     session.refresh(task)
     return task
+
+
+def run_prediction(
+    session: Session,
+    user_id: str,
+    model_name: str,
+    rows: list[dict[str, Any]],
+) -> MLTaskORM:
+    """Полный сценарий MLService.submit из domain.py (синхронно):
+
+    создать задачу с проверкой баланса и сразу выполнить её.
+    """
+    task = create_prediction_task(session, user_id, model_name, rows)
+    return execute_prediction_task(session, task.id)
+
+
+def get_task(session: Session, task_id: str) -> MLTaskORM | None:
+    """Задача предсказания по id (для GET /predict/{task_id})."""
+    return session.get(MLTaskORM, task_id)
 
 
 def get_user_tasks(

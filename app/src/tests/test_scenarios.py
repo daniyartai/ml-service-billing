@@ -201,5 +201,14 @@ def test_init_is_idempotent(session):
 
     demo = get_user_by_email(session, DEMO_USER_EMAIL)
     assert demo is not None
-    # стартовый баланс не начислился повторно
-    assert get_balance(session, demo.id) == Decimal(DEMO_INITIAL_CREDITS)
+    # стартовое начисление существует ровно в одном экземпляре: повторный
+    # init_db() не создаёт второй seed-депозит. Текущий баланс проверять
+    # нельзя — демо-пользователем пользуются вручную (Swagger), и он мог
+    # потратить кредиты. Seed-депозит отличается тем, что одобрен админом.
+    seed_deposits = [
+        t
+        for t in get_user_transactions(session, demo.id)
+        if t.type == TransactionType.DEPOSIT and t.approved_by_id is not None
+    ]
+    assert len(seed_deposits) == 1
+    assert seed_deposits[0].amount == Decimal(DEMO_INITIAL_CREDITS)
