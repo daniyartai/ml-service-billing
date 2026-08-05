@@ -17,9 +17,23 @@ if not DATABASE_URL:
         "(см. app/.env и docker-compose.yml)"
     )
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    # для локальных тестов на SQLite (TestClient ходит из другого потока);
+    # на PostgreSQL параметр не используется
+    connect_args=(
+        {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    ),
+)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def get_db():
+    """FastAPI-зависимость: сессия БД на время одного запроса."""
+    with SessionLocal() as session:
+        yield session
 
 
 class Base(DeclarativeBase):

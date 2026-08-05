@@ -9,14 +9,17 @@
 project-root/
 ├── app/                      # backend-приложение
 │   ├── src/
-│   │   ├── main.py           # FastAPI: /, /health, /models
+│   │   ├── main.py           # FastAPI: роутеры API, /health, /models, обработчики ошибок
 │   │   ├── domain.py         # объектная модель сервиса (этап 1)
 │   │   ├── demo.py           # демо-сценарий работы модели
 │   │   ├── database.py       # подключение к БД (SQLAlchemy, DATABASE_URL из env)
-│   │   ├── db_models.py      # ORM-модели: users, balances, transactions, ml_models, ml_tasks
-│   │   ├── services.py       # бизнес-операции: пользователи, баланс, предикты
+│   │   ├── db_models.py      # ORM-модели: users, balances, transactions, ml_models, ml_tasks, access_tokens
+│   │   ├── services.py       # бизнес-операции: пользователи, баланс, предикты, токены
+│   │   ├── schemas.py        # Pydantic-схемы запросов и ответов API (этап 4)
+│   │   ├── security.py       # bearer-аутентификация, зависимость get_current_user
+│   │   ├── routers/          # эндпоинты по группам: auth, users, balance, predict, history
 │   │   ├── init_db.py        # идемпотентная инициализация БД и демо-данных
-│   │   └── tests/            # pytest-тесты сценариев (этап 3)
+│   │   └── tests/            # pytest-тесты: сценарии БД (этап 3) и REST API (этап 4)
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── .env                  # конфигурация приложения
@@ -224,8 +227,8 @@ enum-ы, полиморфный `predict`).
 Выполняется автоматически при старте `app` (lifespan) и идемпотентна —
 повторный запуск не дублирует и не сбрасывает данные. Создаёт:
 
-- демо-администратора `admin@ml-service.local` / `admin123`;
-- демо-пользователя `demo@ml-service.local` / `demo123` со стартовым
+- демо-администратора `admin@ml-service.com` / `admin123`;
+- демо-пользователя `demo@ml-service.com` / `demo123` со стартовым
   балансом 100 кредитов (deposit-транзакция, одобренная админом);
 - базовые ML-модели `threshold-scoring` (5 кредитов) и
   `linear-regression` (10 кредитов).
@@ -243,3 +246,42 @@ docker compose exec app pytest -v
 списанием, отказ при нехватке кредитов, возврат ошибок валидации без
 списания, история предиктов с сортировкой по дате, идемпотентность
 инициализации.
+
+## REST API (этап 4)
+
+Интерфейс на FastAPI поверх бизнес-логики `services.py` — контроллеры
+(`routers/`) логику не дублируют. Интерактивная документация и ручное
+тестирование — Swagger UI: **http://localhost/docs**.
+
+### Аутентификация
+
+Bearer-токен, хранится в таблице `access_tokens` (JWT — на следующих этапах):
+`POST /auth/login` возвращает `access_token`, дальше он передаётся в заголовке
+`Authorization: Bearer <token>` (в Swagger — кнопка **Authorize**).
+Демо-доступ: `demo@ml-service.com` / `demo123` (баланс 100 кредитов),
+админ — `admin@ml-service.com` / `admin123`.
+
+### Эндпоинты
+
+| Метод и путь | Описание | Коды ошибок |
+|---|---|---|
+| `POST /auth/register` | регистрация | 409 email занят, 422 валидация |
+| `POST /auth/login` | авторизация, выдача токена | 401 неверные данные |
+| `GET /users/me` | текущий пользователь | 401 |
+| `GET /balance` | текущий баланс | 401 |
+| `POST /balance/top-up` | пополнение, возвращает обновлённый баланс | 401, 422 сумма <= 0 |
+| `POST /predict` | предсказание: списание кредитов + запись в историю | 401, 402 нет кредитов, 400 невалидные данные, 404 нет модели |
+| `GET /predict/{task_id}` | задача по id | 401, 404 (в т.ч. чужая задача) |
+| `GET /history/predictions` | история ML-запросов (дата, статус, кредиты) | 401 |
+| `GET /history/transactions` | история транзакций | 401 |
+
+Единый формат ошибок: `{"detail": ...}` с корректным HTTP-кодом.
+Ответ `/predict` построен вокруг задачи (`task_id`, `status`, `result`) —
+контракт готов к асинхронной обработке через RabbitMQ (этап 5): статус
+`new` при постановке и опрос результата через `GET /predict/{task_id}`.
+
+### Тесты
+
+```bash
+docker compose exec app pytest -v   # 20 тестов: сценарии БД + REST API
+```

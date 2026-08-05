@@ -191,3 +191,26 @@ class TransactionORM(Base):
 
     def __repr__(self) -> str:
         return f"<TransactionORM {self.type.value} {self.amount} user={self.user_id}>"
+
+
+class AccessTokenORM(Base):
+    """Токены доступа (access_tokens) — простая bearer-аутентификация.
+
+    Токен выдаётся при логине и передаётся в заголовке
+    Authorization: Bearer <token>. JWT по плану курса — на следующих этапах.
+    """
+
+    __tablename__ = "access_tokens"
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+    user: Mapped[UserORM] = relationship()
+
+    def __repr__(self) -> str:
+        return f"<AccessTokenORM user={self.user_id}>"

@@ -22,9 +22,9 @@ from services import create_user, get_user_by_email, top_up
 
 logger = logging.getLogger(__name__)
 
-DEMO_ADMIN_EMAIL = "admin@ml-service.local"
+DEMO_ADMIN_EMAIL = "admin@ml-service.com"
 DEMO_ADMIN_PASSWORD = "admin123"          # демо-данные, не для продакшена
-DEMO_USER_EMAIL = "demo@ml-service.local"
+DEMO_USER_EMAIL = "demo@ml-service.com"
 DEMO_USER_PASSWORD = "demo123"
 DEMO_INITIAL_CREDITS = 100
 
