@@ -23,7 +23,7 @@ from database import SessionLocal
 from domain import InsufficientBalanceError
 from init_db import init_db
 from mq import QUEUE_NAME, RABBITMQ_URL
-from services import execute_prediction_task
+from services import execute_prediction_task, mark_task_failed, refund_task
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,8 +80,16 @@ def handle_message(channel, method, properties, body) -> None:
     except InsufficientBalanceError as exc:
         status = "insufficient_balance"
         logger.warning("Задача %s отклонена: %s", task_id, exc)
-    except Exception:  # noqa: BLE001 — ошибка логируется, задача помечена в БД
+    except Exception:  # noqa: BLE001 — ошибка логируется, средства возвращаются
         logger.exception("Ошибка обработки сообщения: %r", body)
+        if task_id:
+            # работа не выполнена -> зарезервированные средства возвращаются
+            try:
+                with SessionLocal() as session:
+                    mark_task_failed(session, task_id)
+                    refund_task(session, task_id, "ошибка обработки в воркере")
+            except Exception:  # noqa: BLE001
+                logger.exception("Не удалось вернуть средства по задаче %s", task_id)
     result = {
         "task_id": task_id,
         "prediction": prediction,

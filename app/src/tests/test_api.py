@@ -158,8 +158,9 @@ def test_predict_success_and_history(client):
     task = resp.json()
     assert task["status"] == "new"
     assert task["result"] is None
-    # кредиты ещё не списаны — списание выполнит воркер
-    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
+    # средства зарезервированы сразу при постановке задачи
+    assert task["charged"] == 5.0
+    assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
 
     # consumer: имитируем воркера
     _run_worker(task["task_id"])
@@ -172,7 +173,7 @@ def test_predict_success_and_history(client):
     assert done["result"] == [1]
     assert done["charged"] == 5.0
 
-    # кредиты списаны воркером
+    # успех: резерв остаётся списанным
     assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
 
     # история предиктов: дата, статус, списанные кредиты
@@ -222,13 +223,17 @@ def test_predict_validation_failed_async(client):
     assert resp.status_code == 201  # публикация прошла, валидация — в воркере
     task_id = resp.json()["task_id"]
 
+    # резерв списан при постановке
+    assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
+
     _run_worker(task_id)
 
     task = client.get(f"/predict/{task_id}", headers=headers).json()
     assert task["status"] == "validation_failed"
     assert task["invalid_rows"]  # причины ошибок по строкам
+    assert task["charged"] == 0.0
 
-    # кредиты не списаны
+    # средства возвращены на баланс
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
 
@@ -285,3 +290,98 @@ def test_queue_message_format(client):
     assert message["model"] == "threshold-scoring"
     assert message["features"] == [{"feature_1": 1.0, "feature_2": 1.0}]
     assert "timestamp" in message
+
+
+# ---------------------------------------------------------------------------
+# Возврат средств при неуспехе (замечание ревьюера по этапу №5)
+# ---------------------------------------------------------------------------
+
+def test_refund_when_publish_fails(client, monkeypatch):
+    """Задачу не удалось поставить в очередь -> 503 и возврат средств."""
+    import routers.predict as predict_router
+
+    headers, _ = register_and_login(client)
+    client.post("/balance/top-up", json={"amount": 20}, headers=headers)
+
+    def boom(task):
+        raise RuntimeError("брокер недоступен")
+
+    monkeypatch.setattr(predict_router.mq, "publish_task", boom)
+
+    resp = client.post(
+        "/predict",
+        json={
+            "model": "threshold-scoring",
+            "rows": [{"feature_1": 1.0, "feature_2": 1.0}],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 503
+    assert "средства возвращены" in resp.json()["detail"]
+
+    # баланс восстановлен полностью
+    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
+
+    # в истории видно и списание, и возврат
+    txs = client.get("/history/transactions", headers=headers).json()
+    refunds = [t for t in txs if t["type"] == "deposit" and t["task_id"]]
+    assert len(refunds) == 1 and refunds[0]["amount"] == 5.0
+
+
+def test_refund_when_worker_fails(client, monkeypatch):
+    """Ошибка предикта в воркере -> задача failed и возврат средств."""
+    from database import SessionLocal
+    import services
+    from domain import ThresholdScoringModel
+
+    headers, _ = register_and_login(client)
+    client.post("/balance/top-up", json={"amount": 20}, headers=headers)
+
+    task_id = client.post(
+        "/predict",
+        json={
+            "model": "threshold-scoring",
+            "rows": [{"feature_1": 1.0, "feature_2": 1.0}],
+        },
+        headers=headers,
+    ).json()["task_id"]
+    assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
+
+    def boom(self, rows):
+        raise RuntimeError("модель упала")
+
+    monkeypatch.setattr(ThresholdScoringModel, "predict", boom)
+
+    with SessionLocal() as session:
+        with pytest.raises(RuntimeError):
+            services.execute_prediction_task(session, task_id)
+
+    task = client.get(f"/predict/{task_id}", headers=headers).json()
+    assert task["status"] == "failed"
+    assert task["charged"] == 0.0
+
+    # средства вернулись пользователю
+    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
+
+
+def test_refund_is_idempotent(client):
+    """Повторный возврат по той же задаче не начисляет средства дважды."""
+    from database import SessionLocal
+    import services
+
+    headers, _ = register_and_login(client)
+    client.post("/balance/top-up", json={"amount": 20}, headers=headers)
+    task_id = client.post(
+        "/predict",
+        json={"model": "threshold-scoring", "rows": [{"feature_1": 1.0}]},
+        headers=headers,
+    ).json()["task_id"]
+
+    _run_worker(task_id)  # validation_failed -> возврат
+    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
+
+    with SessionLocal() as session:
+        services.refund_task(session, task_id)
+        services.refund_task(session, task_id)
+
+    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}

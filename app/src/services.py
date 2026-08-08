@@ -14,6 +14,7 @@
 """
 
 import hashlib
+import logging
 import secrets
 from decimal import Decimal
 from typing import Any
@@ -40,6 +41,8 @@ from domain import (
 
 # Реестр реализаций: имя модели в БД -> класс из domain.py.
 # Параметры (стоимость) берутся из БД, поведение (predict) — из domain.
+logger = logging.getLogger(__name__)
+
 MODEL_REGISTRY: dict[str, type[MLModel]] = {
     "threshold-scoring": ThresholdScoringModel,
     "linear-regression": LinearRegressionModel,
@@ -234,9 +237,13 @@ def create_prediction_task(
     model_name: str,
     rows: list[dict[str, Any]],
 ) -> MLTaskORM:
-    """Сторона publisher'а: создать задачу и проверить баланс ДО выполнения.
+    """Сторона publisher'а: создать задачу и ЗАРЕЗЕРВИРОВАТЬ стоимость запроса.
 
-    На этапе №5 именно после этой функции задача уйдёт в очередь RabbitMQ.
+    Средства списываются сразу при постановке задачи (одним коммитом с
+    созданием задачи), поэтому между проверкой баланса и обработкой их нельзя
+    потратить параллельным запросом. Если задачу не удалось опубликовать в
+    очередь или обработка завершилась неуспешно, резерв возвращается через
+    refund_task() — см. publish в routers/predict.py и worker.py.
     """
     user = _require_user(session, user_id)
     model_row = session.scalar(
@@ -255,16 +262,73 @@ def create_prediction_task(
     session.add(task)
     session.flush()  # присваивает task.id
 
+    cost = model_row.cost_per_request
     balance = _lock_balance(session, user.id)
-    if balance.amount < model_row.cost_per_request:
+    if balance.amount < cost:
         task.status = TaskStatus.FAILED
         session.commit()  # отказ тоже сохраняется в истории
         raise InsufficientBalanceError(
-            f"Баланс {balance.amount} < стоимости запроса "
-            f"{model_row.cost_per_request}"
+            f"Баланс {balance.amount} < стоимости запроса {cost}"
         )
+
+    # резерв: списание и запись транзакции атомарно с созданием задачи
+    balance.amount -= cost
+    session.add(
+        TransactionORM(
+            user_id=user.id,
+            type=TransactionType.WITHDRAWAL,
+            amount=cost,
+            task_id=task.id,
+        )
+    )
+    task.charged = cost
     session.commit()
     session.refresh(task)
+    return task
+
+
+def mark_task_failed(session: Session, task_id: str) -> MLTaskORM | None:
+    """Пометить задачу как неуспешную (используется при сбое публикации)."""
+    task = session.get(MLTaskORM, task_id)
+    if task is not None:
+        task.status = TaskStatus.FAILED
+        session.commit()
+    return task
+
+
+def refund_task(session: Session, task_id: str, reason: str = "") -> MLTaskORM:
+    """Вернуть зарезервированные средства на баланс (идемпотентно).
+
+    Вызывается, когда работа не выполнена: задачу не удалось опубликовать в
+    очередь, воркер упал с ошибкой или данные не прошли валидацию.
+    Возврат оформляется отдельной deposit-транзакцией, привязанной к задаче,
+    поэтому виден в истории. Повторный вызов ничего не делает: признак
+    возврата — обнулённое task.charged.
+    """
+    task = session.get(MLTaskORM, task_id)
+    if task is None:
+        raise ValueError(f"Задача {task_id} не найдена")
+    if task.charged <= 0:  # возврата не требуется или он уже выполнен
+        return task
+
+    amount = task.charged
+    balance = _lock_balance(session, task.user_id)
+    balance.amount += amount
+    session.add(
+        TransactionORM(
+            user_id=task.user_id,
+            type=TransactionType.DEPOSIT,
+            amount=amount,
+            task_id=task.id,
+        )
+    )
+    task.charged = Decimal("0")
+    session.commit()
+    session.refresh(task)
+    logger.info(
+        "Возврат %s кредитов по задаче %s%s",
+        amount, task.id, f": {reason}" if reason else "",
+    )
     return task
 
 
@@ -282,6 +346,9 @@ def execute_prediction_task(session: Session, task_id: str) -> MLTaskORM:
     model_row = task.model
     impl = _model_impl(model_row)
 
+    # Средства уже зарезервированы при постановке задачи (create_prediction_task).
+    # Любой неуспех ниже -> возврат резерва на баланс.
+
     # 1. Валидация: некорректные строки возвращаются пользователю
     validation = impl.validate(task.input_data)
     task.invalid_rows = [
@@ -290,39 +357,21 @@ def execute_prediction_task(session: Session, task_id: str) -> MLTaskORM:
     if not validation.has_valid:
         task.status = TaskStatus.VALIDATION_FAILED
         session.commit()
-        return task
+        return refund_task(session, task.id, "данные не прошли валидацию")
 
     # 2. Полиморфный предикт
     task.status = TaskStatus.RUNNING
+    session.commit()
     try:
         result = impl.predict(validation.valid_rows)
     except Exception:
         task.status = TaskStatus.FAILED
         session.commit()
+        refund_task(session, task.id, "ошибка выполнения предикта")
         raise
 
-    # 3. Повторная проверка баланса на момент выполнения (важно для этапа №5,
-    #    где между постановкой и обработкой задачи проходит время),
-    #    затем списание, транзакция и результат — одним коммитом
-    cost = model_row.cost_per_request
-    balance = _lock_balance(session, task.user_id)
-    if balance.amount < cost:
-        task.status = TaskStatus.FAILED
-        session.commit()
-        raise InsufficientBalanceError(
-            f"Баланс {balance.amount} < стоимости запроса {cost}"
-        )
-    balance.amount -= cost
-    session.add(
-        TransactionORM(
-            user_id=task.user_id,
-            type=TransactionType.WITHDRAWAL,
-            amount=cost,
-            task_id=task.id,
-        )
-    )
+    # 3. Успех: результат сохраняется, резерв остаётся списанным
     task.result = result
-    task.charged = cost
     task.status = TaskStatus.DONE
     session.commit()
     session.refresh(task)

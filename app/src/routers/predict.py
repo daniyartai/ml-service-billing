@@ -41,9 +41,12 @@ def create_prediction(
     try:
         mq.publish_task(task)  # publisher -> RabbitMQ -> воркеры
     except Exception as exc:  # noqa: BLE001 — брокер недоступен
+        # работа не будет выполнена -> возвращаем зарезервированные средства
+        services.refund_task(session, task.id, "не удалось поставить в очередь")
+        services.mark_task_failed(session, task.id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Очередь задач недоступна: {exc}",
+            detail=f"Очередь задач недоступна, средства возвращены: {exc}",
         )
     # status='new'; результат появится после обработки воркером
     return TaskResponse.from_task(task)
