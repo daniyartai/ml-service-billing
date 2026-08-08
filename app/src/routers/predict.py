@@ -1,17 +1,18 @@
-"""Эндпоинты /predict: ML-предсказания (Задание №4).
+"""Эндпоинты /predict: ML-предсказания (Задания №4-5).
 
-Контракт рассчитан на асинхронный этап №5: ответ строится вокруг задачи
-(task_id + status), а GET /predict/{task_id} станет эндпоинтом опроса
-результата, когда обработку заберут воркеры RabbitMQ.
+С этапа №5 обработка асинхронная: POST /predict проверяет баланс, создаёт
+задачу, публикует её в очередь RabbitMQ и сразу возвращает task_id со
+статусом 'new'. Валидацию, предикт и списание выполняет воркер; результат
+забирается через GET /predict/{task_id} или /history/predictions.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+import mq
 import services
 from database import get_db
 from db_models import UserORM
-from domain import TaskStatus
 from schemas import PredictRequest, TaskResponse
 from security import get_current_user
 
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/predict", tags=["predict"])
     "",
     response_model=TaskResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Отправить данные для предсказания",
+    summary="Поставить задачу предсказания в очередь",
 )
 def create_prediction(
     payload: PredictRequest,
@@ -30,29 +31,32 @@ def create_prediction(
     session: Session = Depends(get_db),
 ) -> TaskResponse:
     try:
-        # проверка баланса до выполнения; нехватка кредитов -> 402 (обработчик в main)
+        # проверка баланса ДО постановки; нехватка кредитов -> 402 (обработчик в main)
         task = services.create_prediction_task(
             session, current.id, payload.model, payload.rows
         )
     except ValueError as exc:  # модель не найдена в каталоге
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
-    task = services.execute_prediction_task(session, task.id)
-
-    if task.status == TaskStatus.VALIDATION_FAILED:
-        # ни одной корректной строки — ошибка с перечнем причин по строкам
+    try:
+        mq.publish_task(task)  # publisher -> RabbitMQ -> воркеры
+    except Exception as exc:  # noqa: BLE001 — брокер недоступен
+        # работа не будет выполнена -> возвращаем зарезервированные средства
+        services.refund_task(session, task.id, "не удалось поставить в очередь")
+        services.mark_task_failed(session, task.id)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "message": "Входные данные не прошли валидацию",
-                "task_id": task.id,
-                "invalid_rows": task.invalid_rows,
-            },
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Очередь задач недоступна, средства возвращены: {exc}",
         )
+    # status='new'; результат появится после обработки воркером
     return TaskResponse.from_task(task)
 
 
-@router.get("/{task_id}", response_model=TaskResponse, summary="Задача по id")
+@router.get(
+    "/{task_id}",
+    response_model=TaskResponse,
+    summary="Задача по id (опрос результата)",
+)
 def get_prediction(
     task_id: str,
     current: UserORM = Depends(get_current_user),

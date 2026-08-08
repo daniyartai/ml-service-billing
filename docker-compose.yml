@@ -18,7 +18,7 @@ services:
       database:
         condition: service_healthy   # ждём готовности БД перед автоинициализацией
       rabbitmq:
-        condition: service_started
+        condition: service_healthy   # publisher должен видеть живой брокер
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 30s
@@ -52,6 +52,11 @@ services:
     container_name: ml-service-rabbitmq
     hostname: rabbitmq
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
     ports:
       - "5672:5672"    # AMQP
       - "15672:15672"  # management UI
@@ -79,6 +84,28 @@ services:
       retries: 10
     volumes:
       - postgres_volume:/var/lib/postgresql/data
+    networks:
+      - ml-service-network
+
+  # 5. ML-воркеры (Задание №5): consumers очереди ml_tasks.
+  # Собираются из того же образа, что и app, но вместо API запускают worker.py.
+  # deploy.replicas: 2 — минимум два воркера; RabbitMQ раздаёт задачи
+  # round-robin (prefetch_count=1 в worker.py — честное распределение).
+  worker:
+    build: ./app/
+    command: python worker.py
+    restart: on-failure
+    env_file:
+      - ./app/.env
+    volumes:
+      - ./app/src:/app
+    deploy:
+      replicas: 2
+    depends_on:
+      database:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
       - ml-service-network
 
