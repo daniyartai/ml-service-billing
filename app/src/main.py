@@ -9,18 +9,20 @@ REST API (Задание №4) поверх бизнес-логики services.p
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator, Dict
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from database import SessionLocal
 from db_models import MLModelORM
 from domain import InsufficientBalanceError
 from init_db import init_db
-from routers import auth, balance, history, predict, users
+from routers import admin, auth, balance, history, predict, users, web
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,12 +54,22 @@ app.include_router(users.router)
 app.include_router(balance.router)
 app.include_router(predict.router)
 app.include_router(history.router)
+app.include_router(admin.router)
+
+# Web-интерфейс личного кабинета (Задание №6): страницы и статика.
+# Данные страницы получают из этого же REST API — логика не дублируется.
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).resolve().parent / "static")),
+    name="static",
+)
+app.include_router(web.router)
 
 
-@app.get("/", response_model=Dict[str, str], tags=["service"])
-async def index() -> Dict[str, str]:
-    """Корневой эндпоинт: краткое описание сервиса."""
-    logger.info("Вызван корневой маршрут")
+@app.get("/api/info", response_model=Dict[str, str], tags=["service"])
+async def service_info() -> Dict[str, str]:
+    """Служебная информация о сервисе (корень «/» отдаёт главную страницу)."""
+    logger.info("Запрошена информация о сервисе")
     return {
         "service": "ML Service with billing",
         "environment": os.getenv("APP_ENV", "development"),

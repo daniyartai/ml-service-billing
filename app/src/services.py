@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from db_models import (
     AccessTokenORM,
@@ -204,6 +204,26 @@ def withdraw(
     session.commit()
     session.refresh(tx)
     return tx
+
+
+def list_users(session: Session) -> list[UserORM]:
+    """Все пользователи системы (для роли администратора)."""
+    return list(session.scalars(select(UserORM).order_by(UserORM.created_at.desc())))
+
+
+def list_all_transactions(session: Session) -> list[TransactionORM]:
+    """Все транзакции системы (для роли администратора), новые сверху.
+
+    Владелец подгружается сразу (selectinload): админке нужен email по каждой
+    строке, без этого получился бы отдельный запрос на каждую транзакцию.
+    """
+    return list(
+        session.scalars(
+            select(TransactionORM)
+            .options(selectinload(TransactionORM.user))
+            .order_by(TransactionORM.created_at.desc())
+        )
+    )
 
 
 def get_user_transactions(session: Session, user_id: str) -> list[TransactionORM]:

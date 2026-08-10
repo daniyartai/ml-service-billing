@@ -237,6 +237,67 @@ def test_predict_validation_failed_async(client):
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
 
+def test_predict_partial_validation(client):
+    """Требование задания: некорректные строки возвращаются пользователю,
+    корректные — обрабатываются в том же запросе."""
+    headers, _ = register_and_login(client)
+    client.post("/balance/top-up", json={"amount": 20}, headers=headers)
+
+    rows = [
+        {"feature_1": 1.0, "feature_2": 1.0},   # валидная -> 1
+        {"feature_1": 5.0},                     # пропущен признак
+        {"feature_1": "abc", "feature_2": 1.0},  # нечисловое значение
+        {"feature_1": 0.0, "feature_2": 0.0},   # валидная -> 0
+    ]
+    resp = client.post(
+        "/predict", json={"model": "threshold-scoring", "rows": rows}, headers=headers
+    )
+    # одна плохая ячейка не должна отклонять всю выборку целиком
+    assert resp.status_code == 201, resp.text
+    task_id = resp.json()["task_id"]
+
+    _run_worker(task_id)
+
+    task = client.get(f"/predict/{task_id}", headers=headers).json()
+    assert task["status"] == "done"
+    assert task["result"] == [1, 0]  # предсказание только по валидным строкам
+
+    # пользователь видит, какие именно строки отклонены и почему
+    invalid = task["invalid_rows"]
+    assert [item["row"] for item in invalid] == [rows[1], rows[2]]
+    assert "отсутствуют признаки" in invalid[0]["reason"]
+    assert "нечисловые значения" in invalid[1]["reason"]
+
+    # работа выполнена -> резерв остаётся списанным
+    assert task["charged"] == 5.0
+    assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
+
+
+def test_predict_all_rows_non_numeric_refunded(client):
+    """Ни одна строка не прошла валидацию -> запрос не выполнен, кредиты возвращены."""
+    headers, _ = register_and_login(client)
+    client.post("/balance/top-up", json={"amount": 20}, headers=headers)
+
+    resp = client.post(
+        "/predict",
+        json={
+            "model": "threshold-scoring",
+            "rows": [{"feature_1": "n/a", "feature_2": None}],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    task_id = resp.json()["task_id"]
+
+    _run_worker(task_id)
+
+    task = client.get(f"/predict/{task_id}", headers=headers).json()
+    assert task["status"] == "validation_failed"
+    assert "нечисловые значения" in task["invalid_rows"][0]["reason"]
+    assert task["charged"] == 0.0
+    assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
+
+
 def test_predict_unknown_model_404(client):
     headers, _ = register_and_login(client)
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
@@ -317,7 +378,10 @@ def test_refund_when_publish_fails(client, monkeypatch):
         headers=headers,
     )
     assert resp.status_code == 503
-    assert "средства возвращены" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "кредиты возвращены" in detail
+    # текст ошибки брокера пользователю не показываем — он уходит в лог
+    assert "брокер недоступен" not in detail
 
     # баланс восстановлен полностью
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}

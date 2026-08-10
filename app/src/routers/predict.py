@@ -6,6 +6,8 @@
 забирается через GET /predict/{task_id} или /history/predictions.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -15,6 +17,8 @@ from database import get_db
 from db_models import UserORM
 from schemas import PredictRequest, TaskResponse
 from security import get_current_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/predict", tags=["predict"])
 
@@ -44,9 +48,15 @@ def create_prediction(
         # работа не будет выполнена -> возвращаем зарезервированные средства
         services.refund_task(session, task.id, "не удалось поставить в очередь")
         services.mark_task_failed(session, task.id)
+        # подробности отказа брокера — в лог; пользователю адреса и коды ошибок
+        # инфраструктуры не нужны и ни о чём ему не говорят
+        logger.error("Не удалось опубликовать задачу %s: %s", task.id, exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Очередь задач недоступна, средства возвращены: {exc}",
+            detail=(
+                "Сервис обработки временно недоступен, кредиты возвращены "
+                "на баланс. Попробуйте отправить запрос позже."
+            ),
         )
     # status='new'; результат появится после обработки воркером
     return TaskResponse.from_task(task)

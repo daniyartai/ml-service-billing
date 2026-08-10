@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">Личный кабинет ML-сервиса</p>
+    <h1>Предсказания по табличным данным — с точным учётом кредитов</h1>
+    <p class="lead">Отправляете строки признаков, получаете предсказание по каждой
+       корректной строке. Стоимость запроса резервируется на балансе и возвращается,
+       если работа не выполнена.</p>
+    <div class="cta">
+        <a class="btn" href="/register" data-auth="no">Создать аккаунт</a>
+        <a class="btn ghost" href="/login" data-auth="no">Войти</a>
+        <a class="btn" href="/dashboard" data-auth="yes" hidden>Перейти в кабинет</a>
+        <a class="btn ghost" href="/history" data-auth="yes" hidden>История операций</a>
+    </div>
+  </div>
+
+  <div>
+    <p class="eyebrow">Путь запроса</p>
+    <div class="pipeline live" id="hero-pipeline">
+      <div class="stage on">
+        <span class="num">01</span><span class="name">Запрос</span>
+        <span class="note">баланс проверен</span>
+      </div>
+      <div class="link"></div>
+      <div class="stage">
+        <span class="num">02</span><span class="name">Очередь</span>
+        <span class="note">RabbitMQ</span>
+      </div>
+      <div class="link"></div>
+      <div class="stage">
+        <span class="num">03</span><span class="name">Воркер</span>
+        <span class="note">валидация и предикт</span>
+      </div>
+      <div class="link"></div>
+      <div class="stage">
+        <span class="num">04</span><span class="name">Результат</span>
+        <span class="note">кредиты списаны</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <p class="eyebrow">Как это работает</p>
+  <div class="grid-3">
+    <article class="card">
+      <h3>Кредиты вместо счетов</h3>
+      <p class="hint">Баланс в условных кредитах. Стоимость известна заранее и
+         резервируется при постановке задачи — списание происходит только за
+         выполненную работу.</p>
+    </article>
+    <article class="card">
+      <h3>Видно, что отклонено</h3>
+      <p class="hint">Строки с пропущенными признаками возвращаются с причиной
+         отклонения, остальные обрабатываются моделью в том же запросе.</p>
+    </article>
+    <article class="card">
+      <h3>Асинхронная обработка</h3>
+      <p class="hint">Задача уходит в очередь и достаётся свободному воркеру.
+         Страница показывает, на каком шаге запрос находится сейчас.</p>
+    </article>
+    <article class="card">
+      <h3>История под рукой</h3>
+      <p class="hint">Дата, статус, отправленные данные, результат и списанные
+         кредиты — по каждому запросу и каждой транзакции.</p>
+    </article>
+  </div>
+</section>
+
+<section style="margin-top:44px">
+  <p class="eyebrow">Доступные модели</p>
+  <div id="models-list" class="hint">Загружаем каталог…</div>
+</section>
+{% endblock %}

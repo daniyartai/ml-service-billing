@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="eyebrow">Личный кабинет</p>
+<div class="split" style="margin-bottom:20px">
+  <article class="card">
+    <h3>Баланс</h3>
+    <p class="metric"><span id="balance">—</span><small>кредитов</small></p>
+    <form id="topup-form" class="inline">
+      <input type="number" name="amount" min="1" step="1" value="50" required aria-label="Сумма пополнения">
+      <button class="btn" type="submit">Пополнить</button>
+    </form>
+    <div class="quick">
+      <button class="btn-sm topup-quick" data-amount="10">+10</button>
+      <button class="btn-sm topup-quick" data-amount="50">+50</button>
+      <button class="btn-sm topup-quick" data-amount="100">+100</button>
+    </div>
+    <div id="topup-msg"></div>
+  </article>
+
+  <article class="card">
+    <h3>Аккаунт</h3>
+    <dl class="kv" style="margin-top:14px">
+      <dt>Email</dt><dd id="acc-email">—</dd>
+      <dt>Роль</dt><dd id="acc-role">—</dd>
+      <dt>ID</dt><dd id="acc-id" class="mono small">—</dd>
+    </dl>
+    <p class="hint" style="margin-top:16px">Тот же аккаунт работает через REST API —
+       откройте <a href="/docs" target="_blank" rel="noopener">Swagger</a> и авторизуйтесь тем же паролем.</p>
+  </article>
+</div>
+
+<article class="card">
+  <h3>Новый запрос</h3>
+  <p class="hint" style="margin:6px 0 20px">Введите строки признаков или загрузите файл.
+     Кредиты резервируются при отправке и возвращаются, если работа не выполнена.</p>
+
+  <div class="split">
+    <form id="predict-form" class="form">
+      <label>Модель
+        <select name="model" id="model-select" required></select>
+      </label>
+      <p class="spec" id="model-hint"></p>
+
+      <label>Строки признаков — JSON-массив
+        <textarea name="rows" id="rows" rows="7" required spellcheck="false"></textarea>
+      </label>
+
+      <label>Или загрузите файл CSV либо JSON
+        <input type="file" id="file" accept=".csv,.json,text/csv,application/json">
+      </label>
+
+      <button class="btn" type="submit" id="predict-submit">Отправить запрос</button>
+    </form>
+
+    <div>
+      <p class="eyebrow">Статус задачи</p>
+      <div class="pipeline" id="task-pipeline">
+        <div class="stage" data-stage="request">
+          <span class="num">01</span><span class="name">Запрос</span>
+          <span class="note">ожидает отправки</span>
+        </div>
+        <div class="link"></div>
+        <div class="stage" data-stage="queue">
+          <span class="num">02</span><span class="name">Очередь</span>
+          <span class="note">—</span>
+        </div>
+        <div class="link"></div>
+        <div class="stage" data-stage="worker">
+          <span class="num">03</span><span class="name">Воркер</span>
+          <span class="note">—</span>
+        </div>
+        <div class="link"></div>
+        <div class="stage" data-stage="result">
+          <span class="num">04</span><span class="name">Результат</span>
+          <span class="note">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="predict-msg"></div>
+  <div id="predict-result"></div>
+</article>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="form-page">
+  <p class="eyebrow">Регистрация</p>
+  <h1>Создать аккаунт</h1>
+  <p class="hint" style="margin:10px 0 22px">Новый аккаунт начинается с нулевым
+     балансом — пополните его в кабинете и отправляйте запросы.</p>
+  <form id="register-form" class="card form">
+    <label>Email<input type="email" name="email" required placeholder="you@example.com"></label>
+    <label>Пароль<input type="password" name="password" minlength="6" required
+           placeholder="не короче 6 символов"></label>
+    <button class="btn" type="submit">Создать аккаунт</button>
+    <p class="hint">Уже зарегистрированы? <a href="/login">Войдите</a>.</p>
+  </form>
+  <div id="msg"></div>
+</section>
+{% endblock %}

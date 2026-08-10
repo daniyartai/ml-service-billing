@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="form-page">
+  <p class="eyebrow">Вход</p>
+  <h1>С возвращением</h1>
+  <p class="hint" style="margin:10px 0 22px">Демо-доступ уже подставлен в поля — можно
+     войти и осмотреться.</p>
+  <form id="login-form" class="card form">
+    <label>Email<input type="email" name="email" required value="demo@ml-service.com"></label>
+    <label>Пароль<input type="password" name="password" required value="demo123"></label>
+    <button class="btn" type="submit">Войти</button>
+    <p class="hint">Нет аккаунта? <a href="/register">Создайте за минуту</a>.</p>
+  </form>
+  <div id="msg"></div>
+</section>
+{% endblock %}

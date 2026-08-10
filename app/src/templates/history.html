@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="eyebrow">Журнал операций</p>
+<h1>История</h1>
+<p class="lead" style="margin:10px 0 26px">Все запросы и движения кредитов по вашему
+   аккаунту, новые сверху.</p>
+
+<article class="card" style="margin-bottom:20px">
+  <h3>ML-запросы</h3>
+  <div class="table-wrap">
+    <table id="tasks">
+      <thead><tr>
+        <th>Дата и время</th><th>Модель</th><th>Статус</th>
+        <th>Списано</th><th>Отправленные данные</th><th>Результат</th>
+      </tr></thead>
+      <tbody><tr><td colspan="6" class="muted">Загружаем…</td></tr></tbody>
+    </table>
+  </div>
+</article>
+
+<article class="card">
+  <h3>Транзакции</h3>
+  <div class="table-wrap">
+    <table id="txs">
+      <thead><tr>
+        <th>Дата и время</th><th>Операция</th><th>Сумма</th><th>Задача</th>
+      </tr></thead>
+      <tbody><tr><td colspan="4" class="muted">Загружаем…</td></tr></tbody>
+    </table>
+  </div>
+</article>
+{% endblock %}

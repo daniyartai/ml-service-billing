@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="eyebrow">Администрирование</p>
+<h1>Пользователи и транзакции</h1>
+<div id="admin-guard"></div>
+
+<div class="admin-tools">
+  <input type="search" id="admin-search" placeholder="Поиск по email" aria-label="Поиск по email">
+  <span class="spec">фильтр действует на обе таблицы</span>
+</div>
+
+<article class="card" style="margin:0 0 20px">
+  <div class="card-head">
+    <h3>Пользователи</h3>
+    <span class="spec" id="users-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="users">
+      <thead><tr>
+        <th>Email</th><th>Роль</th><th>Баланс</th><th>Регистрация</th><th>Действие</th>
+      </tr></thead>
+      <tbody><tr><td colspan="5" class="muted">Загружаем…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="pager" id="users-pager" hidden>
+    <button class="btn-sm" id="users-prev" type="button">Назад</button>
+    <span class="spec" id="users-page"></span>
+    <button class="btn-sm" id="users-next" type="button">Вперёд</button>
+  </div>
+  <div id="admin-msg"></div>
+</article>
+
+<article class="card">
+  <div class="card-head">
+    <h3>Все транзакции системы</h3>
+    <span class="spec" id="txs-count"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="all-txs">
+      <thead><tr>
+        <th>Дата и время</th><th>Операция</th><th>Сумма</th><th>Пользователь</th><th>Задача</th>
+      </tr></thead>
+      <tbody><tr><td colspan="5" class="muted">Загружаем…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="pager" id="txs-pager" hidden>
+    <button class="btn-sm" id="txs-prev" type="button">Назад</button>
+    <span class="spec" id="txs-page"></span>
+    <button class="btn-sm" id="txs-next" type="button">Вперёд</button>
+  </div>
+</article>
+{% endblock %}

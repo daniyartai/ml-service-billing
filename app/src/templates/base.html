@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ML Service — личный кабинет{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="{{ page }}">
+  <header class="nav">
+    <a class="brand" href="/">ML<span>·</span>Service</a>
+    <nav>
+      <a href="/" {% if page == "index" %}class="active"{% endif %}>Главная</a>
+      <a href="/dashboard" data-auth="yes" hidden {% if page == "dashboard" %}class="active"{% endif %}>Кабинет</a>
+      <a href="/history" data-auth="yes" hidden {% if page == "history" %}class="active"{% endif %}>История</a>
+      <a href="/admin" data-admin="yes" hidden {% if page == "admin" %}class="active"{% endif %}>Администрирование</a>
+      <a href="/docs" target="_blank" rel="noopener">API ↗</a>
+    </nav>
+    <div class="user">
+      <span id="nav-user" hidden></span>
+      <a href="/login" data-auth="no">Войти</a>
+      <a href="/register" data-auth="no" class="btn-sm">Создать аккаунт</a>
+      <button id="logout" data-auth="yes" hidden class="btn-sm">Выйти</button>
+    </div>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+  <footer>ML-сервис с биллингом в кредитах · учебный проект курса</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
