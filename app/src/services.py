@@ -376,8 +376,12 @@ def execute_prediction_task(session: Session, task_id: str) -> MLTaskORM:
     ]
     if not validation.has_valid:
         task.status = TaskStatus.VALIDATION_FAILED
-        session.commit()
-        return refund_task(session, task.id, "данные не прошли валидацию")
+        # статус и возврат — одной транзакцией. Если закоммитить статус
+        # отдельно, клиент, опрашивающий /predict/{id} между двумя коммитами,
+        # увидит проваленную задачу с ещё не возвращёнными кредитами.
+        refunded = refund_task(session, task.id, "данные не прошли валидацию")
+        session.commit()  # на случай, если возврат уже был выполнен ранее
+        return refunded
 
     # 2. Полиморфный предикт
     task.status = TaskStatus.RUNNING
@@ -386,8 +390,8 @@ def execute_prediction_task(session: Session, task_id: str) -> MLTaskORM:
         result = impl.predict(validation.valid_rows)
     except Exception:
         task.status = TaskStatus.FAILED
-        session.commit()
         refund_task(session, task.id, "ошибка выполнения предикта")
+        session.commit()
         raise
 
     # 3. Успех: результат сохраняется, резерв остаётся списанным
