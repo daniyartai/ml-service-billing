@@ -449,3 +449,49 @@ def test_refund_is_idempotent(client):
         services.refund_task(session, task_id)
 
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
+
+
+def test_no_intermediate_state_with_unrefunded_charge(client):
+    """Инвариант: снаружи задача никогда не видна как проваленная с
+    непогашенным списанием.
+
+    Статус неуспеха и возврат резерва обязаны попадать в БД одной
+    транзакцией. Если коммитить их по отдельности, клиент, опрашивающий
+    GET /predict/{id} между двумя коммитами, увидит невыполненную работу с
+    уже списанными кредитами. Синхронный вызов воркера в остальных тестах
+    это окно скрывает — здесь оно ловится через журнал коммитов.
+    """
+    from sqlalchemy import event
+
+    from database import SessionLocal
+    from db_models import MLTaskORM
+    from services import execute_prediction_task
+
+    headers, _ = register_and_login(client)
+    client.post("/balance/top-up", json={"amount": 20}, headers=headers)
+    task_id = client.post(
+        "/predict",
+        json={"model": "threshold-scoring", "rows": [{"feature_1": "n/a"}]},
+        headers=headers,
+    ).json()["task_id"]
+
+    committed: list[tuple[str, float]] = []
+
+    with SessionLocal() as session:
+
+        @event.listens_for(session, "after_commit")
+        def _snapshot(sess):  # состояние, ставшее видимым другим сессиям
+            row = sess.get(MLTaskORM, task_id)
+            if row is not None:
+                committed.append((row.status.value, float(row.charged)))
+
+        execute_prediction_task(session, task_id)
+
+    assert committed, "ни одного коммита не зафиксировано"
+    inconsistent = [
+        snap for snap in committed
+        if snap[0] in ("validation_failed", "failed") and snap[1] > 0
+    ]
+    assert not inconsistent, (
+        f"промежуточное состояние видно снаружи: {inconsistent}"
+    )
