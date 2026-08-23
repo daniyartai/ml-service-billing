@@ -437,7 +437,7 @@ Swagger. Бизнес-логика во фронтенде не дублируе
 | `scripts/smoke_test.py` | Развёрнутая система | HTTP к поднятому стенду: реальные БД, очередь, воркеры |
 
 ```bash
-docker compose exec app pytest -q                         # 42 теста
+docker compose exec app pytest -q                         # 56 тестов
 docker compose exec app pytest tests/test_e2e.py -v -s    # сценарий с журналом шагов
 python scripts/smoke_test.py                              # проверка поднятого стенда
 ```

@@ -2,68 +2,21 @@
 
 Запуск внутри контейнера: docker compose exec app pytest -v
 
-TestClient поднимает приложение вместе с lifespan (инициализация БД).
 Каждый тест регистрирует собственного пользователя с уникальным email.
+Фикстуры client/stub_queue/run_worker/make_user — общие для всех тестовых
+файлов, см. conftest.py.
 """
 
-import uuid
-
 import pytest
-from fastapi.testclient import TestClient
 
-
-@pytest.fixture(scope="module")
-def client():
-    from main import app
-
-    with TestClient(app) as c:  # контекст запускает lifespan -> init_db()
-        yield c
-
-
-@pytest.fixture(autouse=True)
-def _stub_queue(monkeypatch):
-    """В тестах брокер не поднимается: публикацию в RabbitMQ заменяем
-    заглушкой, а работу воркера имитируем прямым вызовом
-    services.execute_prediction_task (см. _run_worker)."""
-    import routers.predict as predict_router
-
-    monkeypatch.setattr(predict_router.mq, "publish_task", lambda task: None)
-
-
-def _run_worker(task_id: str) -> None:
-    """Имитация воркера: выполнить задачу так же, как это делает worker.py."""
-    from database import SessionLocal
-    from services import execute_prediction_task
-
-    with SessionLocal() as session:
-        execute_prediction_task(session, task_id)
-
-
-def unique_email() -> str:
-    return f"api-{uuid.uuid4().hex[:10]}@ml-service.com"
-
-
-def register_and_login(client: TestClient) -> tuple[dict, str]:
-    """Зарегистрировать нового пользователя и вернуть (заголовки, email)."""
-    email = unique_email()
-    resp = client.post(
-        "/auth/register", json={"email": email, "password": "secret123"}
-    )
-    assert resp.status_code == 201, resp.text
-    resp = client.post(
-        "/auth/login", json={"email": email, "password": "secret123"}
-    )
-    assert resp.status_code == 200, resp.text
-    token = resp.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}, email
-
+from conftest import unique_email
 
 # ---------------------------------------------------------------------------
 # Регистрация и авторизация
 # ---------------------------------------------------------------------------
 
-def test_register_login_and_me(client):
-    headers, email = register_and_login(client)
+def test_register_login_and_me(client, make_user):
+    headers, email, _ = make_user("api")
 
     resp = client.get("/users/me", headers=headers)
     assert resp.status_code == 200
@@ -112,8 +65,8 @@ def test_protected_endpoints_require_auth(client):
 # Баланс
 # ---------------------------------------------------------------------------
 
-def test_balance_top_up_returns_updated(client):
-    headers, _ = register_and_login(client)
+def test_balance_top_up_returns_updated(client, make_user):
+    headers, _, _ = make_user("api")
 
     resp = client.get("/balance", headers=headers)
     assert resp.status_code == 200
@@ -127,8 +80,8 @@ def test_balance_top_up_returns_updated(client):
     assert resp.json() == {"balance": 50.0}
 
 
-def test_top_up_non_positive_rejected_422(client):
-    headers, _ = register_and_login(client)
+def test_top_up_non_positive_rejected_422(client, make_user):
+    headers, _, _ = make_user("api")
     for bad in (0, -5):
         resp = client.post(
             "/balance/top-up", json={"amount": bad}, headers=headers
@@ -141,8 +94,8 @@ def test_top_up_non_positive_rejected_422(client):
 # Предсказания
 # ---------------------------------------------------------------------------
 
-def test_predict_success_and_history(client):
-    headers, _ = register_and_login(client)
+def test_predict_success_and_history(client, make_user, stub_queue, run_worker):
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
     # publisher: задача поставлена в очередь, ответ сразу — task_id и status=new
@@ -163,7 +116,7 @@ def test_predict_success_and_history(client):
     assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
 
     # consumer: имитируем воркера
-    _run_worker(task["task_id"])
+    run_worker(task["task_id"])
 
     # опрос результата
     resp = client.get(f"/predict/{task['task_id']}", headers=headers)
@@ -194,8 +147,8 @@ def test_predict_success_and_history(client):
     assert withdrawal["task_id"] == task["task_id"]
 
 
-def test_predict_insufficient_balance_402(client):
-    headers, _ = register_and_login(client)  # баланс 0
+def test_predict_insufficient_balance_402(client, make_user, stub_queue):
+    headers, _, _ = make_user("api")  # баланс 0
 
     resp = client.post(
         "/predict",
@@ -211,8 +164,8 @@ def test_predict_insufficient_balance_402(client):
     assert len(history) == 1 and history[0]["status"] == "failed"
 
 
-def test_predict_validation_failed_async(client):
-    headers, _ = register_and_login(client)
+def test_predict_validation_failed_async(client, make_user, stub_queue, run_worker):
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
     resp = client.post(
@@ -226,7 +179,7 @@ def test_predict_validation_failed_async(client):
     # резерв списан при постановке
     assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
 
-    _run_worker(task_id)
+    run_worker(task_id)
 
     task = client.get(f"/predict/{task_id}", headers=headers).json()
     assert task["status"] == "validation_failed"
@@ -237,10 +190,10 @@ def test_predict_validation_failed_async(client):
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
 
-def test_predict_partial_validation(client):
+def test_predict_partial_validation(client, make_user, stub_queue, run_worker):
     """Требование задания: некорректные строки возвращаются пользователю,
     корректные — обрабатываются в том же запросе."""
-    headers, _ = register_and_login(client)
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
     rows = [
@@ -256,7 +209,7 @@ def test_predict_partial_validation(client):
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task_id"]
 
-    _run_worker(task_id)
+    run_worker(task_id)
 
     task = client.get(f"/predict/{task_id}", headers=headers).json()
     assert task["status"] == "done"
@@ -273,9 +226,9 @@ def test_predict_partial_validation(client):
     assert client.get("/balance", headers=headers).json() == {"balance": 15.0}
 
 
-def test_predict_all_rows_non_numeric_refunded(client):
+def test_predict_all_rows_non_numeric_refunded(client, make_user, stub_queue, run_worker):
     """Ни одна строка не прошла валидацию -> запрос не выполнен, кредиты возвращены."""
-    headers, _ = register_and_login(client)
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
     resp = client.post(
@@ -289,7 +242,7 @@ def test_predict_all_rows_non_numeric_refunded(client):
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
 
-    _run_worker(task_id)
+    run_worker(task_id)
 
     task = client.get(f"/predict/{task_id}", headers=headers).json()
     assert task["status"] == "validation_failed"
@@ -298,8 +251,8 @@ def test_predict_all_rows_non_numeric_refunded(client):
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
 
-def test_predict_unknown_model_404(client):
-    headers, _ = register_and_login(client)
+def test_predict_unknown_model_404(client, make_user, stub_queue):
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
     resp = client.post(
         "/predict",
@@ -309,8 +262,8 @@ def test_predict_unknown_model_404(client):
     assert resp.status_code == 404
 
 
-def test_foreign_task_hidden_404(client):
-    headers_a, _ = register_and_login(client)
+def test_foreign_task_hidden_404(client, make_user, stub_queue):
+    headers_a, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers_a)
     task = client.post(
         "/predict",
@@ -321,7 +274,7 @@ def test_foreign_task_hidden_404(client):
         headers=headers_a,
     ).json()
 
-    headers_b, _ = register_and_login(client)
+    headers_b, _, _ = make_user("api")
     resp = client.get(f"/predict/{task['task_id']}", headers=headers_b)
     assert resp.status_code == 404  # чужая задача не раскрывается
 
@@ -337,7 +290,7 @@ def test_queue_message_format(client):
     from services import create_prediction_task, create_user, top_up
 
     with SessionLocal() as session:
-        user = create_user(session, unique_email(), "secret123")
+        user = create_user(session, unique_email("api"), "secret123")
         top_up(session, user.id, 20)
         task = create_prediction_task(
             session,
@@ -357,11 +310,11 @@ def test_queue_message_format(client):
 # Возврат средств при неуспехе (замечание ревьюера по этапу №5)
 # ---------------------------------------------------------------------------
 
-def test_refund_when_publish_fails(client, monkeypatch):
+def test_refund_when_publish_fails(client, make_user, monkeypatch):
     """Задачу не удалось поставить в очередь -> 503 и возврат средств."""
     import routers.predict as predict_router
 
-    headers, _ = register_and_login(client)
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
     def boom(task):
@@ -392,13 +345,13 @@ def test_refund_when_publish_fails(client, monkeypatch):
     assert len(refunds) == 1 and refunds[0]["amount"] == 5.0
 
 
-def test_refund_when_worker_fails(client, monkeypatch):
+def test_refund_when_worker_fails(client, make_user, monkeypatch, stub_queue):
     """Ошибка предикта в воркере -> задача failed и возврат средств."""
     from database import SessionLocal
     import services
     from domain import ThresholdScoringModel
 
-    headers, _ = register_and_login(client)
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
 
     task_id = client.post(
@@ -428,12 +381,12 @@ def test_refund_when_worker_fails(client, monkeypatch):
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
 
-def test_refund_is_idempotent(client):
+def test_refund_is_idempotent(client, make_user, stub_queue, run_worker):
     """Повторный возврат по той же задаче не начисляет средства дважды."""
     from database import SessionLocal
     import services
 
-    headers, _ = register_and_login(client)
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
     task_id = client.post(
         "/predict",
@@ -441,7 +394,7 @@ def test_refund_is_idempotent(client):
         headers=headers,
     ).json()["task_id"]
 
-    _run_worker(task_id)  # validation_failed -> возврат
+    run_worker(task_id)  # validation_failed -> возврат
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
     with SessionLocal() as session:
@@ -451,7 +404,7 @@ def test_refund_is_idempotent(client):
     assert client.get("/balance", headers=headers).json() == {"balance": 20.0}
 
 
-def test_no_intermediate_state_with_unrefunded_charge(client):
+def test_no_intermediate_state_with_unrefunded_charge(client, make_user, stub_queue):
     """Инвариант: снаружи задача никогда не видна как проваленная с
     непогашенным списанием.
 
@@ -467,7 +420,7 @@ def test_no_intermediate_state_with_unrefunded_charge(client):
     from db_models import MLTaskORM
     from services import execute_prediction_task
 
-    headers, _ = register_and_login(client)
+    headers, _, _ = make_user("api")
     client.post("/balance/top-up", json={"amount": 20}, headers=headers)
     task_id = client.post(
         "/predict",
